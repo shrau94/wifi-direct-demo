@@ -10,14 +10,18 @@ import android.net.wifi.p2p.WifiP2pDevice;
 import android.net.wifi.p2p.WifiP2pDeviceList;
 import android.net.wifi.p2p.WifiP2pInfo;
 import android.net.wifi.p2p.WifiP2pManager;
+import android.os.AsyncTask;
 import android.os.Bundle;
 
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
 import com.google.android.material.snackbar.Snackbar;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
 
+import android.os.Handler;
+import android.os.Message;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
@@ -27,7 +31,13 @@ import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -50,6 +60,14 @@ public class MainActivity extends AppCompatActivity {
     String[] deviceNameArray;
     WifiP2pDevice[] deviceArray;
 
+    static final int MESSAGE_READ = 1;
+
+    ServerClass serverClass;
+    ClientClass clientClass;
+//    SendReceive sendReceive;
+
+    String userType;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -57,6 +75,20 @@ public class MainActivity extends AppCompatActivity {
         initialWork();
         exqListener();
     }
+
+    Handler handler = new Handler(new Handler.Callback() {
+        @Override
+        public boolean handleMessage(@NonNull Message msg) {
+            switch(msg.what) {
+                case MESSAGE_READ:
+                    byte[] readBuff = (byte[]) msg.obj;
+                    String tempMsg = new String(readBuff, 0, msg.arg1);
+                    read_msg_box.setText(tempMsg);
+                    break;
+            }
+            return true;
+        }
+    });
 
     private void exqListener() {
         final MainActivity activity = this;
@@ -110,12 +142,35 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
         });
+//        btnSend.setOnClickListener(new View.OnClickListener() {
+//            @Override
+//            public void onClick(View v) {
+//                String msg = writeMsg.getText().toString();
+//                sendReceive.write(msg.getBytes());
+//            }
+//        });
+
+        btnSend.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String msg = writeMsg.getText().toString();
+                byte[] bytes =msg.getBytes();
+                btnSend.setVisibility(View.INVISIBLE);
+                if(userType.equals("server")) {
+                    serverClass.writeData(bytes);
+                } else {
+                    clientClass.writeData(bytes);
+                }
+            }
+        });
     }
 
     private void initialWork() {
         btnOnOff = (Button) findViewById(R.id.buttonWifi);
         btnDiscover = (Button) findViewById(R.id.buttonDiscoverPeers);
         btnSend = (Button) findViewById(R.id.buttonSend);
+        btnSend.setVisibility(View.INVISIBLE);
+
         listView = (ListView) findViewById(R.id.listNearbyDevices);
         read_msg_box = (TextView) findViewById(R.id.msg);
         connectionStatus = (TextView) findViewById(R.id.status);
@@ -169,8 +224,14 @@ public class MainActivity extends AppCompatActivity {
 
             if(wifiP2pInfo.groupFormed && wifiP2pInfo.isGroupOwner) {
                 connectionStatus.setText("Host");
+                serverClass = new ServerClass();
+                serverClass.execute();
+                userType = "server";
             } else if (wifiP2pInfo.groupFormed) {
                 connectionStatus.setText("Client");
+                clientClass = new ClientClass(groupOwnerAddress);
+                clientClass.execute();
+                userType = "client";
             }
         }
     };
@@ -186,4 +247,225 @@ public class MainActivity extends AppCompatActivity {
         super.onPause();
         unregisterReceiver(mReceiver);
     }
+
+
+
+    public class ServerClass extends AsyncTask<String, Integer, Boolean> {
+        Socket socket;
+        ServerSocket serverSocket;
+        InputStream inputStream;
+        OutputStream outputStream;
+        @Override
+        protected Boolean doInBackground(String... strings) {
+            boolean result = true;
+            try {
+                serverSocket = new ServerSocket(8888);
+                socket = serverSocket.accept();
+            } catch (IOException e) {
+                result = false;
+                e.printStackTrace();
+            }
+            return result;
+        }
+
+        public void writeData(final byte[] bytes) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        outputStream.write(bytes);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }).start();
+            btnSend.setVisibility(View.VISIBLE);
+        }
+
+        @Override
+        protected void onPostExecute(Boolean result) {
+            if(result) {
+                try {
+                    inputStream = socket.getInputStream();
+                    outputStream = socket.getOutputStream();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+                //listener
+                new Thread(new Runnable(){
+                    public void run() {
+                        byte[] buffer = new byte[1024];
+                        int x;
+                        while (socket!=null) {
+                            try {
+                                x = inputStream.read(buffer);
+                                if(x>0) {
+                                    handler.obtainMessage(MESSAGE_READ,x,-1,buffer).sendToTarget();
+                                }
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+                }).start();
+                btnSend.setVisibility(View.VISIBLE);
+            } else {
+                Toast.makeText(getApplicationContext(),"could not create sockets",Toast.LENGTH_SHORT).show();
+                //restart socket assignment process
+            }
+        }
+    }
+
+    public class ClientClass extends AsyncTask<String, Integer, Boolean> {
+        Socket socket;
+        String hostAdd;
+        InputStream inputStream;
+        OutputStream outputStream;
+
+        public ClientClass(InetAddress hostAddress) {
+            hostAdd = hostAddress.getHostAddress();
+            socket = new Socket();
+        }
+
+        @Override
+        protected Boolean doInBackground(String... strings) {
+            boolean result = false;
+            try {
+                socket.connect(new InetSocketAddress(hostAdd, 8888), 5000);
+                result = true;
+                return result;
+            } catch (IOException e) {
+                e.printStackTrace();
+                result = false;
+                return result;
+            }
+        }
+
+        public void writeData(final byte[] bytes) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        outputStream.write(bytes);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }).start();
+            btnSend.setVisibility(View.VISIBLE);
+        }
+
+        @Override
+        protected void onPostExecute(Boolean result) {
+            if(result) {
+                try {
+                    inputStream = socket.getInputStream();
+                    outputStream = socket.getOutputStream();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+                new Thread(new Runnable(){
+                    public void run() {
+                        byte[] buffer = new byte[1024];
+                        int x;
+                        while (socket!=null) {
+                            try {
+                                x = inputStream.read(buffer);
+                                if(x>0) {
+                                    handler.obtainMessage(MESSAGE_READ,x,-1,buffer).sendToTarget();
+                                }
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+                }).start();
+                btnSend.setVisibility(View.VISIBLE);
+            } else {
+                Toast.makeText(getApplicationContext(),"could not create sockets",Toast.LENGTH_SHORT).show();
+                //restart socket assignment process
+            }
+        }
+    }
+
+    /*public class ServerClass extends Thread {
+
+        Socket socket;
+        ServerSocket serverSocket;
+
+        @Override
+        public void run() {
+            try {
+                serverSocket = new ServerSocket(8888);
+                socket = serverSocket.accept();
+                sendReceive = new SendReceive(socket);
+                sendReceive.start();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private class SendReceive extends Thread {
+        private Socket socket;
+        private InputStream inputStream;
+        private OutputStream outputStream;
+
+        public SendReceive(Socket skt) {
+            socket = skt;
+            try {
+                inputStream = socket.getInputStream();
+                outputStream = socket.getOutputStream();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        @Override
+        public void run() {
+            byte[] buffer = new byte[1024];
+            int bytes;
+
+            while(socket != null) {
+                try {
+                    bytes = inputStream.read(buffer);
+                    if(bytes>0) {
+                        handler.obtainMessage(MESSAGE_READ, bytes, -1, buffer).sendToTarget();
+                    }
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+
+            }
+        }
+
+        public void write(byte[] bytes) {
+            try {
+                outputStream.write(bytes);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    public class ClientClass extends Thread {
+        Socket socket;
+        String hostAdd;
+
+        public ClientClass(InetAddress hostAddress) {
+            hostAdd = hostAddress.getHostAddress();
+            socket = new Socket();
+        }
+
+        @Override
+        public void run() {
+            try {
+                socket.connect(new InetSocketAddress(hostAdd, 8888), 500);
+                sendReceive = new SendReceive(socket);
+                sendReceive.start();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }*/
 }
